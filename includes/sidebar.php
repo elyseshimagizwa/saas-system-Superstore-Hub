@@ -794,12 +794,20 @@ href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
             </a>
 
             <?php endif; ?>
+            
 
             <div class="sidebar-title">
 
                 Sécurité
 
             </div>
+            <a
+                href="backups/index.php"
+                class="sidebar-link <?= isActivePage('security_logs.php',$currentPage) ?>"
+            >
+                <i class="fa fa-shield-halved text-red-400"></i>
+                manager backup
+            </a>
 
             <a
                 href="security_logs.php"
@@ -831,6 +839,8 @@ href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
 
                 Déconnexion
             </a>
+
+            
 
         </nav>
 

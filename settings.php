@@ -5,6 +5,49 @@ requireRole('admin');
 
 $user = currentUser();
 
+function historique(
+    $pdo,
+    $userId,
+    $action,
+    $details,
+    $niveau='INFO',
+    $magasin_id=null
+){
+
+    $ip =
+        $_SERVER['REMOTE_ADDR']
+        ?? 'UNKNOWN';
+
+    $stmt =
+        $pdo->prepare("
+            INSERT INTO historiques
+            (
+                utilisateur_id,
+                action,
+                details,
+                ip,
+                niveau,
+                magasin_id,
+                created_at
+            )
+            VALUES
+            (
+                ?,?,?,?,?,?,
+                NOW()
+            )
+        ");
+
+    $stmt->execute([
+
+        $userId,
+        $action,
+        $details,
+        $ip,
+        strtoupper($niveau),
+        $magasin_id
+    ]);
+}
+
 /* =========================
    SETTINGS
 ========================= */
@@ -139,6 +182,23 @@ if (
         $pays,
         $statut
     ]);
+    $magasinId =
+    $pdo->lastInsertId();
+
+historique(
+
+    $pdo,
+
+    $user['id'],
+
+    'AJOUT_MAGASIN',
+
+    'Nouveau magasin : '.$nom,
+
+    'SUCCESS',
+
+    $magasinId
+);
 
     flash(
         'success',
@@ -240,6 +300,20 @@ if (
         $statut,
         $id
     ]);
+    historique(
+
+    $pdo,
+
+    $user['id'],
+
+    'MODIFICATION_MAGASIN',
+
+    'Magasin modifié : '.$nom,
+
+    'INFO',
+
+    $id
+);
 
     flash(
         'success',
@@ -253,38 +327,84 @@ if (
 /* =========================
    DELETE MAGASIN
 ========================= */
-if(isset($_GET['delete_magasin'])){
+if(
+    $_SERVER['REQUEST_METHOD']==='POST'
+    &&
+    isset($_POST['delete_magasin'])
+){
+
+    verify_csrf();
 
     $id =
-        (int)$_GET['delete_magasin'];
+        (int)$_POST['delete_magasin'];
 
-    if($id > 0){
+    $q =
+        $pdo->prepare("
+            SELECT *
+            FROM magasins
+            WHERE id=?
+        ");
 
-        $q =
-            $pdo->prepare("
-                SELECT *
-                FROM magasins
-                WHERE id=?
-            ");
+    $q->execute([$id]);
 
-        $q->execute([$id]);
+    $magasin =
+        $q->fetch();
 
-        $magasin =
-            $q->fetch();
+    if(!$magasin){
 
-        if($magasin){
+        flash(
+            'error',
+            'Magasin introuvable'
+        );
 
-            $pdo->prepare("
-                DELETE FROM magasins
-                WHERE id=?
-            ")->execute([$id]);
-
-            flash(
-                'success',
-                '🗑️ Magasin supprimé'
-            );
-        }
+        header("Location: settings.php");
+        exit;
     }
+
+    $checkUsers =
+        $pdo->prepare("
+            SELECT COUNT(*)
+            FROM utilisateurs
+            WHERE magasin_id=?
+        ");
+
+    $checkUsers->execute([$id]);
+
+    if($checkUsers->fetchColumn() > 0){
+
+        flash(
+            'error',
+            'Impossible : utilisateurs liés au magasin'
+        );
+
+        header("Location: settings.php");
+        exit;
+    }
+
+    $pdo->prepare("
+        DELETE FROM magasins
+        WHERE id=?
+    ")->execute([$id]);
+
+    historique(
+
+        $pdo,
+
+        $user['id'],
+
+        'SUPPRESSION_MAGASIN',
+
+        'Magasin supprimé : '.$magasin['nom'],
+
+        'DANGER',
+
+        $id
+    );
+
+    flash(
+        'success',
+        '🗑️ Magasin supprimé'
+    );
 
     header("Location: settings.php");
     exit;
@@ -432,22 +552,29 @@ $magasins =
 /* =========================
    STATS
 ========================= */
+$stats =
+    $pdo->query("
+        SELECT
+
+            COUNT(*) total,
+
+            SUM(
+                CASE
+                    WHEN statut='actif'
+                    THEN 1
+                    ELSE 0
+                END
+            ) actifs
+
+        FROM magasins
+    ")
+    ->fetch();
+
 $totalMagasins =
-    count($magasins);
+    (int)$stats['total'];
 
-$totalActifs = 0;
-
-foreach($magasins as $m){
-
-    if(
-        ($m['statut'] ?? '')
-        ===
-        'actif'
-    ){
-
-        $totalActifs++;
-    }
-}
+$totalActifs =
+    (int)$stats['actifs'];
 
 include 'includes/header.php';
 include 'includes/sidebar.php';
@@ -492,8 +619,40 @@ include 'includes/sidebar.php';
 </div>
 
 <?php endif; ?>
+<div class="grid md:grid-cols-2 gap-5 mb-8">
+
+    <div class="bg-white rounded-3xl shadow p-6">
+
+        <div class="text-gray-500">
+            Total magasins
+        </div>
+
+        <div class="text-4xl font-black">
+
+            <?= $totalMagasins ?>
+
+        </div>
+
+    </div>
+
+    <div class="bg-white rounded-3xl shadow p-6">
+
+        <div class="text-gray-500">
+            Magasins actifs
+        </div>
+
+        <div class="text-4xl font-black text-green-600">
+
+            <?= $totalActifs ?>
+
+        </div>
+
+    </div>
+
+</div>
 
 <!-- SETTINGS -->
+
 <div
     id="settingsSection"
     class="hidden bg-white dark:bg-slate-900 rounded-3xl shadow-xl p-6 mb-8"
@@ -758,13 +917,30 @@ include 'includes/sidebar.php';
     ✏️
 </button>
 
-<a
-    href="?delete_magasin=<?= $m['id'] ?>"
-    onclick="return confirm('Supprimer ce magasin ?')"
+<form
+    method="POST"
+    onsubmit="return confirm('Supprimer ce magasin ?')"
+>
+
+<input
+    type="hidden"
+    name="csrf_token"
+    value="<?= csrf_token() ?>"
+>
+
+<input
+    type="hidden"
+    name="delete_magasin"
+    value="<?= $m['id'] ?>"
+>
+
+<button
     class="bg-red-600 text-white px-4 py-2 rounded-xl"
 >
     🗑️
-</a>
+</button>
+
+</form>
 
 </td>
 

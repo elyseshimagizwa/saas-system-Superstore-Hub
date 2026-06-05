@@ -13,7 +13,7 @@ $user = currentUser();
 $allowedRoles = ['admin', 'caissier'];
 
 if (!in_array($user['role'], $allowedRoles)) {
-    header("Location: index.php?error=access_denied");
+    header("Location: dashboard.php?error=access_denied");
     exit;
 }
 
@@ -56,51 +56,89 @@ if($date2){
     $params[] = $date2;
 }
 
-/* USER */
-if($userId){
 
-    $where[] = "v.utilisateur_id=?";
+// Démarrez la session au tout début du fichier si ce n'est pas déjà fait
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+/* ==========================================================================
+   1. GESTION DES FILTRES & PARAMÈTRES
+   ========================================================================== */
+$where = [];
+$params = [];
+
+// FILTRE OBLIGATOIRE : Uniquement le magasin de l'utilisateur connecté
+if (isset($_SESSION['magasin_id'])) {
+    $where[] = "v.magasin_id = ?";
+    $params[] = $_SESSION['magasin_id'];
+} else {
+    // Sécurité : Si l'utilisateur n'est pas connecté à un magasin, on bloque l'affichage
+    $where[] = "1 = 0"; 
+}
+
+// FILTRE OPTIONNEL : Si un utilisateur/vendeur spécifique est sélectionné
+if (!empty($userId)) {
+    $where[] = "v.utilisateur_id = ?";
     $params[] = $userId;
 }
 
-/* =========================
-   SQL
-========================= */
-
+/* ==========================================================================
+   2. REQUÊTE SQL PRINCIPALE (Avec alias pour corriger le Warning 'nom')
+   ========================================================================== */
 $sql = "
 SELECT
     v.*,
-    u.nom
-
+    u.nom AS utilisateur_nom, -- Résout le conflit de la clé 'nom'
+    m.nom AS magasin_nom       -- Optionnel : pour afficher le nom du magasin
 FROM ventes v
-
-LEFT JOIN utilisateurs u
-ON u.id = v.utilisateur_id
+LEFT JOIN utilisateurs u ON u.id = v.utilisateur_id
+LEFT JOIN magasins m ON m.id = v.magasin_id
 ";
 
-/* WHERE */
-if($where){
-
-    $sql .= " WHERE ".implode(" AND ", $where);
+/* Application des filtres WHERE */
+if (!empty($where)) {
+    $sql .= " WHERE " . implode(" AND ", $where);
 }
 
-/* ORDER */
-$sql .= "
-ORDER BY v.id DESC
-LIMIT 200
-";
+/* ==========================================================================
+   3. PAGINATION
+   ========================================================================== */
+$page = max(1, (int)($_GET['page'] ?? 1));
+$limit = 50;
+$offset = ($page - 1) * $limit;
 
+$sql .= " ORDER BY v.id DESC LIMIT $limit OFFSET $offset";
+
+/* ==========================================================================
+   4. REQUÊTE DE COMPTAGE (Optimisée sans JOIN inutiles)
+   ========================================================================== */
+$countSql = "SELECT COUNT(*) FROM ventes v";
+
+if (!empty($where)) {
+    $countSql .= " WHERE " . implode(" AND ", $where);
+}
+
+$countStmt = $pdo->prepare($countSql);
+$countStmt->execute($params);
+$totalRows = (int)$countStmt->fetchColumn();
+
+$totalPages = max(1, ceil($totalRows / $limit));
+
+/* ==========================================================================
+   5. EXÉCUTION & RÉCUPÉRATION DES DONNÉES
+   ========================================================================== */
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
+$ventes = $stmt->fetchAll(PDO::FETCH_ASSOC); // FETCH_ASSOC évite les doublons d'index numériques
 
-$ventes = $stmt->fetchAll();
-
-/* USERS */
+/* LISTE DES UTILISATEURS POUR LE FORMULAIRE DE FILTRE */
 $users = $pdo->query("
     SELECT id, nom
     FROM utilisateurs
     ORDER BY nom ASC
-")->fetchAll();
+")->fetchAll(PDO::FETCH_ASSOC);
+
 
 include 'includes/header.php';
 include 'includes/sidebar.php';
@@ -241,7 +279,9 @@ class="grid md:grid-cols-5 gap-4">
 
 </thead>
 
-<tbody id="salesTable">
+<tbody
+id="salesTable"
+data-page="<?= $page ?>"
 
 <?php foreach($ventes as $v): ?>
 
@@ -262,7 +302,7 @@ $tva = isset($v['tva'])
     </td>
 
     <td class="p-4">
-        <?= e($v['nom']) ?>
+        <?= e($v['utilisateur_nom']) ?>
     </td>
 
     <td class="p-4 text-green-600 font-bold">
@@ -348,6 +388,34 @@ $tva = isset($v['tva'])
 
 </div>
 
+<!--Ajouter la navigation des pages-->
+<div class="flex justify-center mt-6 gap-2 flex-wrap">
+
+<?php for($i=1;$i<=$totalPages;$i++): ?>
+
+<a
+href="?<?= http_build_query(
+array_merge(
+$_GET,
+['page'=>$i]
+)
+) ?>"
+class="
+px-4 py-2 rounded-xl
+<?= $page==$i
+? 'bg-blue-600 text-white'
+: 'bg-white dark:bg-slate-800'
+?>
+"
+>
+
+<?= $i ?>
+
+</a>
+
+<?php endfor; ?>
+
+</div>
 <!-- MODAL -->
 <div id="modal" class="fixed inset-0 bg-black/70 hidden items-center justify-center z-50 p-4">
 
@@ -385,7 +453,16 @@ async function showDetails(id){
     document.getElementById("modal").classList.remove("hidden");
     document.getElementById("modal").classList.add("flex");
 
-    let r = await fetch("vente_details_ajax.php?id="+id);
+
+    //Optimisation AJAX du détail ticket
+
+
+    let r = await fetch(
+    "vente_details_ajax.php?id="+id,
+    {
+        cache:"force-cache"
+    }
+);
     document.getElementById("modalContent").innerHTML = await r.text();
 }
 
@@ -393,6 +470,37 @@ function closeModal(){
     document.getElementById("modal").classList.add("hidden");
     document.getElementById("modal").classList.remove("flex");
 }
+let loading = false;
+
+window.addEventListener(
+'scroll',
+async ()=>{
+
+if(loading) return;
+
+if(
+window.innerHeight +
+window.scrollY
+>=
+document.body.offsetHeight - 300
+){
+
+loading = true;
+
+console.log(
+"Prêt pour chargement page suivante"
+);
+
+/*
+Ici plus tard :
+historique-ventes.php?ajax=1&page=2
+*/
+
+loading = false;
+
+}
+
+});
 
 </script>
 

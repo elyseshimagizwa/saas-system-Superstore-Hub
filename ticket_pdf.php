@@ -1,495 +1,732 @@
 
 <?php
+
+
+
 require_once 'config.php';
 require_once 'config-settings.php';
+
 requireLogin();
 
-/* =========================
-   SETTINGS
-========================= */
+header('X-Frame-Options: SAMEORIGIN');
+header('X-Content-Type-Options: nosniff');
+
+$user = currentUser();
+
+$magasin_id = (int)($user['magasin_id'] ?? 0);
+
+if ($magasin_id <= 0) {
+    exit("Aucun magasin assigné");
+}
 
 $settings = getSettings();
 
-$devise =
-    $settings['devise'];
+$tvaRate = (float)($settings['tva'] ?? 0);
+$devise = trim($settings['devise'] ?? 'BIF');
+$nomBoutique = trim($settings['nom_boutique'] ?? 'POS');
+$logo = trim($settings['logo'] ?? '');
 
-$tvaRate =
-    $settings['tva'];
-
-$id =
-    (int)($_GET['id'] ?? 0);
-
-/* =========================
-   VENTE
-========================= */
-
-$stmt = $pdo->prepare("
-    SELECT
-        v.*,
-        u.nom AS caissier,
-        m.nom AS magasin_nom,
-        m.adresse AS magasin_adresse,
-        m.telephone AS magasin_telephone
-    FROM ventes v
-
-    JOIN utilisateurs u
-        ON u.id = v.utilisateur_id
-
-    LEFT JOIN magasins m
-        ON m.id = v.magasin_id
-
-    WHERE v.id=?
+$stmtMagasin = $pdo->prepare("
+    SELECT *
+    FROM magasins
+    WHERE id=?
 ");
 
-$stmt->execute([$id]);
+$stmtMagasin->execute([$magasin_id]);
 
-$vente = $stmt->fetch();
+$magasin = $stmtMagasin->fetch();
 
-if(!$vente){
+$stmtProduits = $pdo->prepare("
+    SELECT *
+    FROM produits
+    WHERE quantite > 0
+    AND magasin_id=?
+    ORDER BY nom ASC
+");
 
-    exit("❌ Vente introuvable");
+$stmtProduits->execute([$magasin_id]);
+
+$produits = $stmtProduits->fetchAll();
+
+/* =========================================================
+   VENTE
+========================================================= */
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST'
+    && isset($_POST['valider'])) {
+
+    verify_csrf();
+
+    try {
+
+        $items = json_decode(
+            $_POST['panier'] ?? '[]',
+            true
+        );
+
+        if(empty($items)) {
+            throw new Exception("Panier vide");
+        }
+
+        $mode = trim($_POST['mode_paiement']);
+
+        $montantRecu = (float)$_POST['montant_recu'];
+
+        $pdo->beginTransaction();
+
+        $totalHT = 0;
+
+        $validatedItems = [];
+
+        foreach($items as $it){
+
+            $q = $pdo->prepare("
+                SELECT *
+                FROM produits
+                WHERE id=?
+                FOR UPDATE
+            ");
+
+            $q->execute([$it['id']]);
+
+            $p = $q->fetch();
+
+            if(!$p){
+                throw new Exception("Produit introuvable");
+            }
+
+            if($p['quantite'] < $it['qty']){
+                throw new Exception("Stock insuffisant");
+            }
+
+            $sousTotal =
+                $it['qty'] * $p['prix_vente'];
+
+            $totalHT += $sousTotal;
+
+            $validatedItems[] = [
+
+                'id' => $p['id'],
+                'nom' => $p['nom'],
+                'qty' => $it['qty'],
+                'prix' => $p['prix_vente'],
+                'sous_total' => $sousTotal
+            ];
+        }
+
+        $tva =
+            $totalHT * ($tvaRate / 100);
+
+        $totalTTC =
+            $totalHT + $tva;
+
+        $monnaie =
+            max(0, $montantRecu - $totalTTC);
+
+        $numeroTicket =
+            'TK-'.date('YmdHis');
+
+        $stmt = $pdo->prepare("
+            INSERT INTO ventes
+            (
+                numero_ticket,
+                utilisateur_id,
+                magasin_id,
+                total,
+                montant_recu,
+                monnaie,
+                mode_paiement,
+                tva,
+                date_vente
+            )
+            VALUES
+            (
+                ?,?,?,?,?,?,?,?,NOW()
+            )
+        ");
+
+        $stmt->execute([
+
+            $numeroTicket,
+            $user['id'],
+            $magasin_id,
+            $totalTTC,
+            $montantRecu,
+            $monnaie,
+            $mode,
+            $tva
+        ]);
+
+        $venteId = $pdo->lastInsertId();
+
+        foreach($validatedItems as $item){
+
+            $ligne = $pdo->prepare("
+                INSERT INTO ligne_ventes
+                (
+                    vente_id,
+                    produit_id,
+                    quantite,
+                    prix_unitaire,
+                    sous_total
+                )
+                VALUES
+                (?,?,?,?,?)
+            ");
+
+            $ligne->execute([
+
+                $venteId,
+                $item['id'],
+                $item['qty'],
+                $item['prix'],
+                $item['sous_total']
+            ]);
+
+            $update = $pdo->prepare("
+                UPDATE produits
+                SET quantite = quantite - ?
+                WHERE id=?
+            ");
+
+            $update->execute([
+
+                $item['qty'],
+                $item['id']
+            ]);
+        }
+
+        $pdo->commit();
+
+        header("Location:caisse.php?ticket=".$venteId);
+
+        exit;
+
+    } catch(Throwable $e){
+
+        if($pdo->inTransaction()){
+            $pdo->rollBack();
+        }
+
+        die($e->getMessage());
+    }
 }
 
-/* =========================
-   LIGNES
-========================= */
+include 'includes/header.php';
+include 'includes/sidebar.php';
 
-$stmt = $pdo->prepare("
-    SELECT
-        p.nom,
-        lv.quantite,
-        lv.prix_unitaire,
-        lv.sous_total
-
-    FROM ligne_ventes lv
-
-    JOIN produits p
-        ON p.id = lv.produit_id
-
-    WHERE lv.vente_id=?
-");
-
-$stmt->execute([$id]);
-
-$lines = $stmt->fetchAll();
-
-/* =========================
-   CALCULS
-========================= */
-
-$totalTTC =
-    $vente['total'];
-
-$tva =
-    $vente['tva']
-    ??
-    ($totalTTC * $tvaRate / (100 + $tvaRate));
-
-$totalHT =
-    $totalTTC - $tva;
-
-/* =========================
-   QR CODE
-========================= */
-
-$qrText =
-    "VENTE #".$vente['id']
-    ." | TOTAL : "
-    .$totalTTC." ".$devise;
 ?>
 
-<!DOCTYPE html>
-
-<html lang="fr">
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
->
-
-<title>
-
-Ticket #<?= $vente['id'] ?>
-
-</title>
-
 <script src="https://cdn.tailwindcss.com"></script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 
 <style>
 
 body{
-
-    background:#e5e7eb;
-
-    font-family:
-        monospace;
+    background:#f1f5f9;
 }
 
-.ticket{
-
-    width:80mm;
-
+.product-card{
     background:white;
-
-    margin:auto;
-
-    padding:14px;
+    border-radius:20px;
+    padding:18px;
+    border:1px solid #e2e8f0;
+    transition:.2s;
 }
 
-.line{
-
-    border-top:
-        1px dashed #000;
-
-    margin:
-        10px 0;
+.product-card:hover{
+    transform:translateY(-3px);
 }
 
-@media print{
-
-    body{
-
-        background:white;
-    }
-
-    .no-print{
-
-        display:none;
-    }
-
-    .ticket{
-
-        width:80mm;
-
-        box-shadow:none;
-    }
+.ticket-box{
+    width:80mm;
+    background:white;
+    padding:15px;
+    font-family:monospace;
 }
 
 </style>
 
-</head>
+<div class="p-5">
 
-<body class="py-6">
+<div class="flex justify-between mb-6">
 
-<div class="ticket shadow-2xl rounded-xl">
+<div>
 
-    <!-- LOGO -->
-    <?php if(!empty($settings['logo'])): ?>
+<h1 class="text-4xl font-black">
+POS CAISSE
+</h1>
 
-    <div class="flex justify-center mb-3">
-
-        <img
-            src="<?= e($settings['logo']) ?>"
-            class="w-20 h-20 object-contain"
-        >
-
-    </div>
-
-    <?php endif; ?>
-
-    <!-- BOUTIQUE -->
-    <div class="text-center">
-
-        <div class="text-xl font-black uppercase">
-
-            <?= e($settings['nom_boutique']) ?>
-
-        </div>
-
-        <?php if(!empty($vente['magasin_nom'])): ?>
-
-        <div class="text-sm mt-1">
-
-            🏪
-            <?= e($vente['magasin_nom']) ?>
-
-        </div>
-
-        <?php endif; ?>
-
-        <div class="text-xs text-gray-600 mt-2">
-
-            <?= e($vente['magasin_adresse']) ?>
-
-            <br>
-
-            📞
-            <?= e($vente['magasin_telephone']) ?>
-
-        </div>
-
-    </div>
-
-    <div class="line"></div>
-
-    <!-- INFOS -->
-    <div class="text-xs leading-6">
-
-        <div class="flex justify-between">
-
-            <span>Ticket :</span>
-
-            <span>
-                #<?= $vente['id'] ?>
-            </span>
-
-        </div>
-
-        <div class="flex justify-between">
-
-            <span>Date :</span>
-
-            <span>
-                <?= $vente['date_vente'] ?>
-            </span>
-
-        </div>
-
-        <div class="flex justify-between">
-
-            <span>Caissier :</span>
-
-            <span>
-                <?= e($vente['caissier']) ?>
-            </span>
-
-        </div>
-
-        <div class="flex justify-between">
-
-            <span>Paiement :</span>
-
-            <span>
-                <?= e($vente['mode_paiement']) ?>
-            </span>
-
-        </div>
-
-    </div>
-
-    <div class="line"></div>
-
-    <!-- PRODUITS -->
-    <div>
-
-        <?php foreach($lines as $l): ?>
-
-        <div class="mb-3">
-
-            <div class="font-bold text-sm">
-
-                <?= e($l['nom']) ?>
-
-            </div>
-
-            <div class="flex justify-between text-xs">
-
-                <span>
-
-                    <?= $l['quantite'] ?>
-
-                    x
-
-                    <?= number_format(
-                        $l['prix_unitaire'],
-                        2
-                    ) ?>
-
-                    <?= $devise ?>
-
-                </span>
-
-                <span class="font-bold">
-
-                    <?= number_format(
-                        $l['sous_total'],
-                        2
-                    ) ?>
-
-                    <?= $devise ?>
-
-                </span>
-
-            </div>
-
-        </div>
-
-        <?php endforeach; ?>
-
-    </div>
-
-    <div class="line"></div>
-
-    <!-- TOTAL -->
-    <div class="text-sm">
-
-        <div class="flex justify-between">
-
-            <span>HT :</span>
-
-            <span>
-
-                <?= number_format(
-                    $totalHT,
-                    2
-                ) ?>
-
-                <?= $devise ?>
-
-            </span>
-
-        </div>
-
-        <div class="flex justify-between">
-
-            <span>
-
-                TVA
-                <?= $tvaRate ?>%
-
-            </span>
-
-            <span>
-
-                <?= number_format(
-                    $tva,
-                    2
-                ) ?>
-
-                <?= $devise ?>
-
-            </span>
-
-        </div>
-
-        <div class="flex justify-between text-lg font-black mt-2">
-
-            <span>TOTAL</span>
-
-            <span>
-
-                <?= number_format(
-                    $totalTTC,
-                    2
-                ) ?>
-
-                <?= $devise ?>
-
-            </span>
-
-        </div>
-
-    </div>
-
-    <div class="line"></div>
-
-    <!-- RECU -->
-    <div class="text-xs leading-6">
-
-        <div class="flex justify-between">
-
-            <span>Reçu :</span>
-
-            <span>
-
-                <?= number_format(
-                    $vente['montant_recu'],
-                    2
-                ) ?>
-
-                <?= $devise ?>
-
-            </span>
-
-        </div>
-
-        <div class="flex justify-between">
-
-            <span>Monnaie :</span>
-
-            <span>
-
-                <?= number_format(
-                    $vente['monnaie'],
-                    2
-                ) ?>
-
-                <?= $devise ?>
-
-            </span>
-
-        </div>
-
-    </div>
-
-    <div class="line"></div>
-
-    <!-- QR -->
-    <div class="flex justify-center my-3">
-
-        <img
-            src="https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=<?= urlencode($qrText) ?>"
-        >
-
-    </div>
-
-    <!-- FOOTER -->
-    <div class="text-center text-xs text-gray-600 leading-6">
-
-        🙏 Merci pour votre achat
-
-        <br>
-
-        À bientôt ❤️
-
-    </div>
+<div class="text-gray-500 mt-1">
+<?= e($nomBoutique) ?>
+</div>
 
 </div>
 
-<!-- ACTIONS -->
-<div class="no-print mt-5 flex justify-center gap-3">
+<button
+onclick="toggleCart()"
+class="bg-black text-white px-5 py-3 rounded-2xl"
+>
 
-    <button
-        onclick="window.print()"
-        class="bg-black text-white px-6 py-3 rounded-xl font-bold"
-    >
+🛒 Panier
 
-        🖨 Imprimer
+</button>
 
-    </button>
+</div>
 
-    <button
-        onclick="window.location='caisse.php'"
-        class="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold"
-    >
+<div class="grid md:grid-cols-4 gap-4">
 
-        ⬅ Retour Caisse
+<?php foreach($produits as $p): ?>
 
-    </button>
+<button
+type="button"
+onclick='addItem(<?= json_encode($p) ?>)'
+class="product-card text-left"
+>
+
+<div class="font-bold text-lg">
+
+<?= e($p['nom']) ?>
+
+</div>
+
+<div class="mt-2 text-green-600 font-bold">
+
+<?= number_format($p['prix_vente'],2) ?>
+
+<?= e($devise) ?>
+
+</div>
+
+<div class="mt-2 text-sm text-gray-500">
+
+Stock :
+<?= (int)$p['quantite'] ?>
+
+</div>
+
+</button>
+
+<?php endforeach; ?>
+
+</div>
+
+</div>
+
+<!-- PANIER -->
+
+<div
+id="cartPanel"
+class="fixed top-0 right-0 w-[400px] h-full bg-white shadow-2xl hidden overflow-y-auto z-50"
+>
+
+<div class="p-5 flex justify-between border-b">
+
+<h2 class="text-2xl font-black">
+
+🛒 Panier
+
+</h2>
+
+<button onclick="toggleCart()">
+
+✖
+
+</button>
+
+</div>
+
+<div id="cart" class="p-5"></div>
+
+<div class="p-5 border-t">
+
+<form
+method="POST"
+onsubmit="return submitCart()"
+>
+
+<input
+type="hidden"
+name="csrf_token"
+value="<?= csrf_token() ?>"
+>
+
+<input
+type="hidden"
+name="valider"
+value="1"
+>
+
+<input
+type="hidden"
+name="panier"
+id="panierField"
+>
+
+<select
+name="mode_paiement"
+class="w-full border rounded-xl p-3 mb-3"
+>
+
+<option>Espèces</option>
+<option>Carte</option>
+<option>Mobile Money</option>
+
+</select>
+
+<input
+type="number"
+step="0.01"
+min="0"
+name="montant_recu"
+id="recu"
+placeholder="Montant reçu"
+class="w-full border rounded-xl p-3 mb-3"
+>
+
+<div class="text-2xl font-black">
+
+Total :
+<span id="total">0</span>
+
+</div>
+
+<button
+class="w-full bg-green-600 text-white p-4 rounded-2xl mt-4 font-bold"
+>
+
+✔ Finaliser Vente
+
+</button>
+
+</form>
+
+</div>
 
 </div>
 
 <script>
 
-/* =========================
-   AUTO PRINT
-========================= */
+let cart = [];
 
-window.onload = ()=>{
+function toggleCart(){
+
+    document
+    .getElementById('cartPanel')
+    .classList
+    .toggle('hidden');
+}
+
+function addItem(p){
+
+    let found =
+        cart.find(i => i.id == p.id);
+
+    if(found){
+
+        found.qty++;
+
+    }else{
+
+        cart.push({
+
+            id:p.id,
+            nom:p.nom,
+            prix:p.prix_vente,
+            qty:1
+        });
+    }
+
+    render();
+}
+
+function removeItem(index){
+
+    cart.splice(index,1);
+
+    render();
+}
+
+function render(){
+
+    let html = '';
+
+    let total = 0;
+
+    cart.forEach((i,index)=>{
+
+        let s =
+            i.qty * i.prix;
+
+        total += s;
+
+        html += `
+        <div class="border-b pb-3 mb-3">
+
+            <div class="font-bold">
+                ${i.nom}
+            </div>
+
+            <div>
+                ${i.qty} x ${i.prix}
+            </div>
+
+            <div class="font-black mt-1">
+                ${s.toFixed(2)}
+            </div>
+
+            <button
+            onclick="removeItem(${index})"
+            class="text-red-500 text-sm mt-2"
+            >
+                Supprimer
+            </button>
+
+        </div>
+        `;
+    });
+
+    document
+    .getElementById('cart')
+    .innerHTML = html;
+
+    document
+    .getElementById('total')
+    .innerText =
+        total.toFixed(2) + ' <?= e($devise) ?>';
+}
+
+function submitCart(){
+
+    if(cart.length <= 0){
+
+        alert("Panier vide");
+
+        return false;
+    }
+
+    document
+    .getElementById('panierField')
+    .value =
+        JSON.stringify(cart);
+
+    return true;
+}
+
+</script>
+
+<?php if(isset($_GET['ticket'])): ?>
+
+<?php
+
+$venteId = (int)$_GET['ticket'];
+
+$stmt = $pdo->prepare("
+    SELECT *
+    FROM ventes
+    WHERE id=?
+");
+
+$stmt->execute([$venteId]);
+
+$vente = $stmt->fetch();
+
+$stmtLignes = $pdo->prepare("
+    SELECT lv.*, p.nom
+    FROM ligne_ventes lv
+    JOIN produits p
+    ON p.id=lv.produit_id
+    WHERE vente_id=?
+");
+
+$stmtLignes->execute([$venteId]);
+
+$lignes = $stmtLignes->fetchAll();
+
+?>
+
+<div id="ticketPrint" class="hidden">
+
+<div class="ticket-box">
+
+<center>
+
+<?php if($logo): ?>
+
+<img
+src="<?= e($logo) ?>"
+style="width:80px;margin-bottom:10px;"
+>
+
+<?php endif; ?>
+
+<h2><?= e($nomBoutique) ?></h2>
+
+<?= e($magasin['nom']) ?>
+
+<hr>
+
+Ticket :
+<?= e($vente['numero_ticket']) ?>
+
+<br>
+
+<?= date('d/m/Y H:i') ?>
+
+<hr>
+
+</center>
+
+<?php foreach($lignes as $l): ?>
+
+<div style="margin-bottom:8px;">
+
+<?= e($l['nom']) ?>
+
+<br>
+
+<?= (int)$l['quantite'] ?>
+
+x
+
+<?= number_format($l['prix_unitaire'],2) ?>
+
+=
+
+<?= number_format($l['sous_total'],2) ?>
+
+</div>
+
+<?php endforeach; ?>
+
+<hr>
+
+TOTAL :
+<?= number_format($vente['total'],2) ?>
+
+<?= e($devise) ?>
+
+<br>
+
+TVA :
+<?= number_format($vente['tva'],2) ?>
+
+<br>
+
+Monnaie :
+<?= number_format($vente['monnaie'],2) ?>
+
+<hr>
+
+<div
+    id="qrcode"
+    style="margin-top:15px;text-align:center;"
+></div>
+
+<div style="margin-top:10px;font-size:11px;text-align:center;">
+
+    Vérification :
+
+    <?= BASE_URL ?>/verify-ticket.php?ticket=<?= urlencode($vente['numero_ticket']) ?>
+
+</div>
+
+</div>
+
+<script>
+
+new QRCode(
+    document.getElementById("qrcode"),
+    {
+        text:
+            "<?= BASE_URL ?>/verify-ticket.php?ticket=<?= urlencode($vente['numero_ticket']) ?>",
+
+        width:120,
+        height:120
+    }
+);
+
+window.onload = () => {
+
+    let content =
+        document
+        .getElementById('ticketPrint')
+        .innerHTML;
+
+    let copies = prompt(
+        "Nombre de copies à imprimer ?",
+        "2"
+    );
+
+    copies = parseInt(copies);
+
+    if(isNaN(copies) || copies <= 0){
+
+        copies = 1;
+    }
+
+    let w =
+        window.open(
+            '',
+            '',
+            'width=400,height=700'
+        );
+
+    let html = `
+    <html>
+    <head>
+        <title>Ticket</title>
+
+        <style>
+
+            body{
+                font-family:monospace;
+                margin:0;
+                padding:0;
+            }
+
+            .ticket-copy{
+                margin-bottom:25px;
+                page-break-after:always;
+            }
+
+        </style>
+
+    </head>
+
+    <body>
+    `;
+
+    for(let i=0; i<copies; i++){
+
+        html += `
+        <div class="ticket-copy">
+            ${content}
+        </div>
+        `;
+    }
+
+    html += `
+    </body>
+    </html>
+    `;
+
+    w.document.write(html);
+
+    w.document.close();
+
+    w.focus();
 
     setTimeout(()=>{
 
-        window.print();
+        w.print();
 
     },500);
 };
 
 </script>
 
-</body>
-</html>
+<?php endif; ?>
 
+<?php include 'includes/footer.php'; ?>

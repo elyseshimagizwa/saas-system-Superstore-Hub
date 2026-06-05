@@ -119,7 +119,21 @@ $devise =
    AJAX
 ========================================================= */
 
+
+
 if (isset($_GET['ajax'])) {
+
+$cacheFile = __DIR__.'/cache/dashboard_kpi.json';
+
+if(
+    file_exists($cacheFile)
+    &&
+    time() - filemtime($cacheFile) < 30
+){
+    echo file_get_contents($cacheFile);
+    exit;
+}
+
 
     header('Content-Type: application/json');
 
@@ -173,7 +187,8 @@ if (isset($_GET['ajax'])) {
         $sqlToday = "
             SELECT COALESCE(SUM(v.total),0)
             FROM ventes v
-            WHERE DATE(v.date_vente)=CURDATE()
+            WHERE v.date_vente >= CURDATE()
+            AND v.date_vente < CURDATE() + INTERVAL 1 DAY
             $whereVente
         ";
 
@@ -294,17 +309,122 @@ if (isset($_GET['ajax'])) {
             $response["employes"] =
                 $employes;
         }
+        $sqlProduits = "
+SELECT COUNT(*)
+FROM produits
+";
 
-        echo json_encode($response);
+$response['produits'] =
+    $pdo->query($sqlProduits)->fetchColumn();
+
+        $json = json_encode($response);
+
+if(!is_dir(__DIR__.'/cache')){
+    mkdir(__DIR__.'/cache');
+}
+
+file_put_contents(
+    $cacheFile,
+    $json
+);
+
+echo $json;
 
         exit;
     }
+
+    if ($_GET['ajax'] === 'transactions') {
+
+    $sql = "
+    SELECT *
+    FROM ventes
+    ORDER BY id DESC
+    LIMIT 15
+    ";
+
+    echo json_encode(
+        $pdo->query($sql)->fetchAll()
+    );
+
+    exit;
+}
+if ($_GET['ajax'] === 'expired_products') {
+
+    $sql = "
+    SELECT nom,date_peremption
+    FROM produits
+    WHERE date_peremption <= CURDATE()
+    ";
+
+    echo json_encode(
+        $pdo->query($sql)->fetchAll()
+    );
+
+    exit;
+}
 
     /* =====================================================
        GRAPH SALES
     ===================================================== */
 
+    if ($_GET['ajax'] === 'profit_graph') {
+
+    $sql = "
+    SELECT
+        DATE(v.date_vente) date,
+        SUM(
+            lv.sous_total -
+            (p.prix_achat * lv.quantite)
+        ) profit
+    FROM ligne_ventes lv
+    JOIN produits p
+        ON p.id = lv.produit_id
+    JOIN ventes v
+        ON v.id = lv.vente_id
+    GROUP BY DATE(v.date_vente)
+    ORDER BY date ASC
+    LIMIT 30
+    ";
+
+    echo json_encode(
+        $pdo->query($sql)->fetchAll()
+    );
+
+    exit;
+}
+
     if ($_GET['ajax'] === 'graph') {
+        if ($_GET['ajax'] === 'profit_graph') {
+
+    $sql = "
+    SELECT
+        DATE(v.date_vente) date,
+        SUM(
+            lv.sous_total -
+            (p.prix_achat * lv.quantite)
+        ) profit
+
+    FROM ligne_ventes lv
+
+    JOIN produits p
+    ON p.id = lv.produit_id
+
+    JOIN ventes v
+    ON v.id = lv.vente_id
+
+    GROUP BY DATE(v.date_vente)
+
+    ORDER BY date ASC
+
+    LIMIT 30
+    ";
+
+    echo json_encode(
+        $pdo->query($sql)->fetchAll()
+    );
+
+    exit;
+}
 
         if (!$isAdmin) {
 
@@ -376,8 +496,46 @@ if (isset($_GET['ajax'])) {
     /* =====================================================
        TOP PRODUCTS
     ===================================================== */
+    if ($_GET['ajax'] === 'notifications') {
+
+    $notifications = [];
+
+    $sql = "
+        SELECT nom, quantite
+        FROM produits
+        WHERE quantite <= seuil_alerte
+        LIMIT 10
+    ";
+
+    $data =
+        $pdo->query($sql)->fetchAll();
+
+    foreach($data as $p){
+
+        $notifications[] = [
+
+            "type" => "warning",
+
+            "message" =>
+            "Stock faible : ".
+            $p['nom'].
+            " (".
+            $p['quantite'].
+            ")"
+        ];
+    }
+
+    echo json_encode($notifications);
+
+    exit;
+}
 
     if ($_GET['ajax'] === 'top_products') {
+
+    /* =====================================================
+   NOTIFICATIONS
+===================================================== */
+
 
         $sql = "
             SELECT
@@ -818,6 +976,18 @@ include 'includes/sidebar.php';
             </div>
 
         </div>
+        <div class="dashboard-card dashboard-blue">
+
+    <div class="dashboard-title">
+        📦 Produits
+    </div>
+
+    <div id="kpiProduits"
+         class="dashboard-number">
+         0
+    </div>
+
+</div>
 
         <?php endif; ?>
 
@@ -827,7 +997,9 @@ include 'includes/sidebar.php';
 
     <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-6">
 
-        <div class="dashboard-glass chart-box">
+        <div
+    id="magasinChartBlock"
+    class="dashboard-glass chart-box">
 
             <h3 class="text-2xl font-black mb-5 text-slate-800 dark:text-white">
 
@@ -845,7 +1017,9 @@ include 'includes/sidebar.php';
 
         <?php if($isAdmin): ?>
 
-        <div class="dashboard-glass chart-box">
+        <div
+    id="salesChartBlock"
+    class="dashboard-glass chart-box">
 
             <h3 class="text-2xl font-black mb-5 text-slate-800 dark:text-white">
 
@@ -895,11 +1069,23 @@ include 'includes/sidebar.php';
             ></div>
 
         </div>
+        <div class="dashboard-glass rounded-[30px] p-6">
+
+    <h3 class="text-2xl font-black mb-5">
+
+        💳 Dernières Transactions
+
+    </h3>
+
+    <div id="transactions"></div>
+
+</div>
 
         <!-- TOP -->
 
-        <div class="dashboard-glass rounded-[30px] p-6">
-
+<div
+    id="topProductsBlock"
+    class="dashboard-glass rounded-[30px] p-6">
             <h3 class="text-2xl font-black mb-5 text-slate-800 dark:text-white">
 
                 🏆 Top Produits
@@ -962,6 +1148,10 @@ async function loadKPI(){
     .getElementById("kpiTransactions")
     .innerText =
         d.transactions;
+
+        document
+.getElementById("kpiProduits")
+.innerText = d.produits;
 
     <?php if($isAdmin): ?>
 
@@ -1249,30 +1439,89 @@ async function loadTopProducts(){
 /* =========================================================
    AUTO LOAD
 ========================================================= */
+/* ==========================
+   CHARGEMENT IMMEDIAT
+========================== */
 
 loadKPI();
-
 loadSales();
+
+setInterval(loadKPI,10000);
+setInterval(loadSales,5000);
+
+/* ==========================
+   LAZY LOADING
+========================== */
+
+const observer = new IntersectionObserver(
+
+(entries)=>{
+
+entries.forEach(entry=>{
+
+if(!entry.isIntersecting)
+return;
+
+/* TOP PRODUITS */
+
+if(entry.target.id==="topProductsBlock"){
 
 loadTopProducts();
 
-setInterval(loadKPI,5000);
+setInterval(loadTopProducts,15000);
 
-setInterval(loadSales,3000);
+observer.unobserve(entry.target);
+}
 
-setInterval(loadTopProducts,10000);
+/* GRAPH VENTES */
 
-<?php if($isAdmin): ?>
+if(entry.target.id==="salesChartBlock"){
 
 loadGraphSales();
 
+setInterval(loadGraphSales,15000);
+
+observer.unobserve(entry.target);
+}
+
+/* GRAPH MAGASINS */
+
+if(entry.target.id==="magasinChartBlock"){
+
 loadCompareMagasin();
 
-setInterval(loadGraphSales,7000);
+setInterval(loadCompareMagasin,15000);
 
-setInterval(loadCompareMagasin,7000);
+observer.unobserve(entry.target);
+}
 
-<?php endif; ?>
+});
+
+},
+{
+threshold:0.2
+}
+);
+
+/* OBSERVER */
+
+let topBlock =
+document.getElementById("topProductsBlock");
+
+if(topBlock)
+observer.observe(topBlock);
+
+let salesChart =
+document.getElementById("salesChartBlock");
+
+if(salesChart)
+observer.observe(salesChart);
+
+let magasinChart =
+document.getElementById("magasinChartBlock");
+
+if(magasinChart)
+observer.observe(magasinChart);
 
 </script>
 

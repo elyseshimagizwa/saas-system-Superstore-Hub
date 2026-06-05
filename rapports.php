@@ -3,6 +3,50 @@ require_once 'config.php';
 requireLogin();
 
 $user = currentUser();
+$settings = getSettings();
+
+$devise =
+    $settings['devise']
+    ?? 'FCFA';
+
+function historique(
+    $pdo,
+    $userId,
+    $action,
+    $details,
+    $niveau='INFO'
+){
+
+    $ip =
+        $_SERVER['REMOTE_ADDR']
+        ?? 'UNKNOWN';
+
+    $stmt =
+        $pdo->prepare("
+            INSERT INTO historiques
+            (
+                utilisateur_id,
+                action,
+                details,
+                ip,
+                niveau,
+                created_at
+            )
+            VALUES
+            (
+                ?,?,?,?,?,NOW()
+            )
+        ");
+
+    $stmt->execute([
+
+        $userId,
+        $action,
+        $details,
+        $ip,
+        strtoupper($niveau)
+    ]);
+}
 
 /* =========================
    ACCÈS ADMIN
@@ -15,8 +59,31 @@ if ($user['role'] !== 'admin') {
 /* =========================
    FILTRES
 ========================= */
-$start = $_GET['start'] ?? date('Y-m-01');
-$end   = $_GET['end'] ?? date('Y-m-d');
+$start =
+    $_GET['start']
+    ?? date('Y-m-01');
+
+$end =
+    $_GET['end']
+    ?? date('Y-m-d');
+
+if(
+    !preg_match(
+        '/^\d{4}-\d{2}-\d{2}$/',
+        $start
+    )
+){
+    $start = date('Y-m-01');
+}
+
+if(
+    !preg_match(
+        '/^\d{4}-\d{2}-\d{2}$/',
+        $end
+    )
+){
+    $end = date('Y-m-d');
+}
 $caissier = $_GET['caissier'] ?? '';
 
 $where = "WHERE DATE(v.date_vente) BETWEEN ? AND ?";
@@ -32,6 +99,21 @@ if ($caissier !== '') {
 ========================= */
 if (isset($_GET['export']) && $_GET['export'] === 'csv') {
 
+historique(
+
+    $pdo,
+
+    $user['id'],
+
+    'EXPORT_RAPPORT',
+
+    'Export CSV ventes du '
+    .$start
+    .' au '
+    .$end,
+
+    'SUCCESS'
+);
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename=rapport_ventes.csv');
 
@@ -69,12 +151,30 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
    KPI GLOBAL
 ========================= */
 $stmt = $pdo->prepare("
-    SELECT 
+    SELECT
+
         COUNT(*) ventes,
-        COALESCE(SUM(total),0) ca
+
+        COALESCE(
+            SUM(total),
+            0
+        ) ca,
+
+        COALESCE(
+            AVG(total),
+            0
+        ) panier_moyen,
+
+        COALESCE(
+            MAX(total),
+            0
+        ) meilleure_vente
+
     FROM ventes v
+
     $where
 ");
+
 $stmt->execute($params);
 $kpi = $stmt->fetch();
 
@@ -114,14 +214,22 @@ $topCashiers = $stmt->fetchAll();
 /* =========================
    PRODUITS NON VENDUS
 ========================= */
-$nonSold = $pdo->query("
-    SELECT nom FROM produits
-    WHERE id NOT IN (
-        SELECT DISTINCT produit_id FROM ligne_ventes
-    )
-    LIMIT 20
-")->fetchAll();
+$nonSold =
+    $pdo->query("
+        SELECT p.nom
 
+        FROM produits p
+
+        LEFT JOIN ligne_ventes lv
+        ON lv.produit_id = p.id
+
+        WHERE lv.id IS NULL
+
+        ORDER BY p.nom
+
+        LIMIT 20
+    ")
+    ->fetchAll();
 include 'includes/header.php';
 include 'includes/sidebar.php';
 ?>
@@ -187,8 +295,7 @@ include 'includes/sidebar.php';
 </div>
 
 <!-- ================= KPI ================= -->
-<div class="grid md:grid-cols-2 gap-4 mb-6">
-
+<div class="grid md:grid-cols-4 gap-4 mb-6">
     <div class="bg-gradient-to-r from-blue-600 to-blue-400 text-white p-5 rounded-2xl shadow">
         📦 Ventes
         <h2 class="text-3xl font-bold"><?= $kpi['ventes'] ?></h2>
@@ -198,6 +305,39 @@ include 'includes/sidebar.php';
         💰 CA Total
         <h2 class="text-3xl font-bold"><?= number_format($kpi['ca'],2) ?> FCFA</h2>
     </div>
+    <div class="bg-gradient-to-r from-purple-600 to-purple-400 text-white p-5 rounded-2xl shadow">
+
+    🧾 Panier Moyen
+
+    <h2 class="text-3xl font-bold">
+
+        <?= number_format(
+            $kpi['panier_moyen'],
+            2
+        ) ?>
+
+        <?= e($devise) ?>
+
+    </h2>
+
+</div>
+
+<div class="bg-gradient-to-r from-orange-600 to-orange-400 text-white p-5 rounded-2xl shadow">
+
+    🚀 Meilleure Vente
+
+    <h2 class="text-3xl font-bold">
+
+        <?= number_format(
+            $kpi['meilleure_vente'],
+            2
+        ) ?>
+
+        <?= e($devise) ?>
+
+    </h2>
+
+</div>
 
 </div>
 

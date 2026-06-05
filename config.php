@@ -407,6 +407,48 @@ function flash(
 | AUTH HELPERS
 |--------------------------------------------------------------------------
 */
+/*
+|--------------------------------------------------------------------------
+| REFRESH USER SESSION
+|--------------------------------------------------------------------------
+*/
+
+function refreshUserSession()
+{
+    global $pdo;
+
+    if (!isLoggedIn()) {
+
+        return;
+    }
+
+    $userId =
+        $_SESSION['user']['id']
+        ?? 0;
+
+    if (!$userId) {
+
+        return;
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT *
+        FROM utilisateurs
+        WHERE id=?
+        LIMIT 1
+    ");
+
+    $stmt->execute([
+        $userId
+    ]);
+
+    $user = $stmt->fetch();
+
+    if ($user) {
+
+        $_SESSION['user'] = $user;
+    }
+}
 
 function isLoggedIn()
 {
@@ -501,6 +543,70 @@ function currentMagasinId()
         null;
 }
 
+
+
+/*
+|--------------------------------------------------------------------------
+| MAGASIN ACTIF GLOBAL
+|--------------------------------------------------------------------------
+*/
+
+function currentMagasin()
+{
+    global $pdo;
+
+    static $magasin = null;
+
+    if ($magasin !== null) {
+
+        return $magasin;
+    }
+
+    $magasinId = currentMagasinId();
+
+    if (!$magasinId) {
+
+        return null;
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT *
+        FROM magasins
+        WHERE id=?
+        LIMIT 1
+    ");
+
+    $stmt->execute([
+        $magasinId
+    ]);
+
+    $magasin = $stmt->fetch();
+
+    return $magasin;
+}
+
+/*
+|--------------------------------------------------------------------------
+| REQUIRE MAGASIN
+|--------------------------------------------------------------------------
+*/
+
+function requireMagasin()
+{
+    if (!currentMagasinId()) {
+
+        flash(
+            'error',
+            '⛔ Aucun magasin actif'
+        );
+
+        header(
+            "Location: change_magasin.php"
+        );
+
+        exit;
+    }
+}
 function isMultiMagasin()
 {
     return !empty(
@@ -545,6 +651,76 @@ function canAccessMagasin($magasinId)
 
         $magasinId
     );
+}
+
+/*
+|--------------------------------------------------------------------------
+| SQL FILTER MAGASIN
+|--------------------------------------------------------------------------
+*/
+
+function sqlMagasinCondition(
+    $alias = '',
+    $column = 'magasin_id'
+)
+{
+    $prefix = '';
+
+    if ($alias) {
+
+        $prefix = $alias . '.';
+    }
+
+    return $prefix . $column . '=' . (int)currentMagasinId();
+}
+
+/*
+|--------------------------------------------------------------------------
+| SQL PARAM MAGASIN
+|--------------------------------------------------------------------------
+*/
+
+function sqlMagasinParam()
+{
+    return [
+        currentMagasinId()
+    ];
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| CHECK OPEN CAISSE
+|--------------------------------------------------------------------------
+*/
+
+function hasOpenCaisse(
+    $utilisateurId = null
+)
+{
+    global $pdo;
+
+    if (!$utilisateurId) {
+
+        $user = currentUser();
+
+        $utilisateurId =
+            $user['id'] ?? 0;
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT id
+        FROM sessions_caisse
+        WHERE utilisateur_id=?
+        AND statut='ouverte'
+        LIMIT 1
+    ");
+
+    $stmt->execute([
+        $utilisateurId
+    ]);
+
+    return (bool)$stmt->fetch();
 }
 
 /*
@@ -1277,6 +1453,60 @@ function updateUserActivity()
         // silent
     }
 }
+
+/*
+|--------------------------------------------------------------------------
+| MULTI MAGASIN MIDDLEWARE
+|--------------------------------------------------------------------------
+*/
+
+function bootMultiMagasin()
+{
+    if (!isLoggedIn()) {
+
+        return;
+    }
+
+    $user = currentUser();
+
+    /*
+    |--------------------------------------------------
+    | BLOQUER SI PAS DE MAGASIN
+    |--------------------------------------------------
+    */
+
+    $allowedPages = [
+
+        'change_magasin.php',
+        'logout.php'
+    ];
+
+    $currentPage =
+        basename(
+            $_SERVER['PHP_SELF']
+        );
+
+    if (
+
+        empty($user['magasin_id'])
+
+        &&
+
+        !in_array(
+            $currentPage,
+            $allowedPages
+        )
+    ) {
+
+        header(
+            "Location: change_magasin.php"
+        );
+
+        exit;
+    }
+}
+
+bootMultiMagasin();
 
 /*
 |--------------------------------------------------------------------------

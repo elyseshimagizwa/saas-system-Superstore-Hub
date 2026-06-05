@@ -620,14 +620,15 @@ if($search !== ''){
             OR u.email LIKE ?
         )
     ";
-
-    $params[] = "%$search%";
-    $params[] = "%$search%";
+$params[] = "$search%";
+$params[] = "$search%";
 }
 
-$sql .= "
-    ORDER BY u.id DESC
-";
+$page = max(1, (int)($_GET['page'] ?? 1));
+
+$limit = 20;
+
+$offset = ($page - 1) * $limit;
 
 $stmtUsers =
     $pdo->prepare($sql);
@@ -641,25 +642,21 @@ $users =
    STATS
 ========================================================= */
 
-$totalUsers =
-    $pdo->query("
-        SELECT COUNT(*)
-        FROM utilisateurs
-    ")->fetchColumn();
+$stats = $pdo->query("
+    SELECT
 
-$totalAdmins =
-    $pdo->query("
-        SELECT COUNT(*)
-        FROM utilisateurs
-        WHERE role='admin'
-    ")->fetchColumn();
+        COUNT(*) AS total_users,
 
-$totalCaissiers =
-    $pdo->query("
-        SELECT COUNT(*)
-        FROM utilisateurs
-        WHERE role='caissier'
-    ")->fetchColumn();
+        SUM(role='admin') AS total_admins,
+
+        SUM(role='caissier') AS total_caissiers
+
+    FROM utilisateurs
+")->fetch(PDO::FETCH_ASSOC);
+
+$totalUsers = (int)$stats['total_users'];
+$totalAdmins = (int)$stats['total_admins'];
+$totalCaissiers = (int)$stats['total_caissiers'];
 
 include 'includes/header.php';
 include 'includes/sidebar.php';
@@ -1112,6 +1109,32 @@ include 'includes/sidebar.php';
     </td>
 
 </tr>
+<?$totalPages = 1;?>
+<?php if($totalPages >= 1): ?>
+
+<div class="flex justify-center gap-2 p-6">
+
+<?php for($i=1;$i<=$totalPages;$i++): ?>
+
+<a
+href="?search=<?= urlencode($search) ?>&page=<?= $i ?>"
+class="
+px-4 py-2 rounded-xl border
+<?= $page==$i
+? 'bg-blue-600 text-white'
+: 'bg-white'
+?>
+">
+
+<?= $i ?>
+
+</a>
+
+<?php endfor; ?>
+
+</div>
+
+<?php endif; ?>
 
 <?php endforeach; ?>
 

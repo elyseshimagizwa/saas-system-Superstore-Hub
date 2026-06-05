@@ -173,8 +173,8 @@ function uploadImages($files, $oldImages = [])
         );
 
         $newName =
-            uniqid('prod_')
-            . '.jpg';
+    bin2hex(random_bytes(16))
+    . '.jpg';
 
         $destination =
             $uploadDir . $newName;
@@ -370,6 +370,9 @@ if (
 ) {
 
     verify_csrf();
+    $pdo->beginTransaction();
+
+try {
 
     $photos =
         uploadImages($_FILES['photos']);
@@ -494,12 +497,25 @@ if (
 
         currentUser()['id']
     ]);
+    $pdo->commit();
 
     flash('success', '✅ Produit ajouté avec succès');
 
-    header('Location: produits.php');
+    } catch(Throwable $e){
 
-    exit;
+    if($pdo->inTransaction()){
+
+        $pdo->rollBack();
+    }
+
+    flash(
+        'error',
+        $e->getMessage()
+    );
+}
+
+header('Location: produits.php');
+exit;
 }
 
 /* ======================================================
@@ -513,6 +529,9 @@ if (
 ) {
 
     verify_csrf();
+    $pdo->beginTransaction();
+
+try {
 
     $stmtOld = $pdo->prepare("
         SELECT *
@@ -657,6 +676,11 @@ if (
 
         currentUser()['id']
     ]);
+    $pdo->commit();}
+    catch (Exception $e) {
+    // Gestion de l'erreur
+    echo "Une erreur est survenue : " . $e->getMessage();
+}
 
     flash('success', '✅ Produit modifié avec succès');
 
@@ -1055,10 +1079,66 @@ if ($categorie_filter > 0) {
    TRI
 ================================ */
 
+/* ===============================
+   PAGINATION
+================================ */
+
+$page = max(
+    1,
+    (int)($_GET['page'] ?? 1)
+);
+
+$limit = 24;
+
+$offset =
+    ($page - 1) * $limit;
+
 $sql .= "
-ORDER BY
-p.nom ASC
+ORDER BY p.nom ASC
+LIMIT $limit
+OFFSET $offset
 ";
+$countSql = "
+SELECT COUNT(*)
+
+FROM produits p
+
+WHERE p.magasin_id=?
+";
+
+$countParams = [$magasin_id];
+
+if ($search !== '') {
+
+    $countSql .= "
+    AND (
+        p.nom LIKE ?
+        OR p.codebarre LIKE ?
+    )
+    ";
+
+    $countParams[] = "%$search%";
+    $countParams[] = "%$search%";
+}
+
+if ($categorie_filter > 0) {
+
+    $countSql .= "
+    AND p.categorie_id=?
+    ";
+
+    $countParams[] = $categorie_filter;
+}
+
+$countStmt = $pdo->prepare($countSql);
+
+$countStmt->execute($countParams);
+
+$totalRows =
+    (int)$countStmt->fetchColumn();
+
+$totalPages =
+    ceil($totalRows / $limit);
 
 $stmt = $pdo->prepare($sql);
 
@@ -1070,36 +1150,43 @@ $produits = $stmt->fetchAll();
    STATS
 ====================================================== */
 
-$totalProduits = $pdo->prepare("
-    SELECT COUNT(*)
-    FROM produits
-    WHERE magasin_id=?
+$stats = $pdo->prepare("
+SELECT
+
+COUNT(*) total_produits,
+
+SUM(
+    CASE
+    WHEN quantite <= seuil_alerte
+    THEN 1
+    ELSE 0
+    END
+) stock_faible,
+
+SUM(
+    prix_achat * quantite
+) valeur_stock
+
+FROM produits
+
+WHERE magasin_id=?
 ");
 
-$totalProduits->execute([$magasin_id]);
+$stats->execute([
+    $magasin_id
+]);
 
-$totalProduits = $totalProduits->fetchColumn();
+$s = $stats->fetch();
 
-$stockFaible = $pdo->prepare("
-    SELECT COUNT(*)
-    FROM produits
-    WHERE magasin_id=?
-    AND quantite <= seuil_alerte
-");
+$totalProduits =
+    $s['total_produits'];
 
-$stockFaible->execute([$magasin_id]);
+$stockFaible =
+    $s['stock_faible'];
 
-$stockFaible = $stockFaible->fetchColumn();
+$valeurStock =
+    $s['valeur_stock'];
 
-$valeurStock = $pdo->prepare("
-    SELECT SUM(prix_achat * quantite)
-    FROM produits
-    WHERE magasin_id=?
-");
-
-$valeurStock->execute([$magasin_id]);
-
-$valeurStock = $valeurStock->fetchColumn();
 
 $categories = $pdo->query("
     SELECT *
@@ -1124,6 +1211,29 @@ $stmtMagasin->execute([
 ]);
 
 $magasin = $stmtMagasin->fetch();
+
+ if($totalPages > 1): ?>
+
+<div class="flex justify-center gap-2 mt-8 flex-wrap">
+
+<?php for($i=1;$i<=$totalPages;$i++): ?>
+
+<a
+href="?page=<?= $i ?>&search=<?= urlencode($search) ?>&categorie_filter=<?= $categorie_filter ?>"
+class="<?= $page==$i
+? 'bg-blue-600 text-white'
+: 'bg-white' ?>
+px-4 py-2 rounded-xl border">
+
+<?= $i ?>
+
+</a>
+
+<?php endfor; ?>
+
+</div>
+
+<?php endif; 
 
 include 'includes/header.php';
 include 'includes/sidebar.php';
@@ -1193,7 +1303,7 @@ include 'includes/sidebar.php';
     <button
     class="bg-black hover:bg-gray-800 transition text-white px-8 rounded-2xl">
 
-        🔎 Rechercher
+        🔎 Rechercher...
 
     </button>
 
@@ -1513,8 +1623,11 @@ $images =
 <?php if(!empty($images)): ?>
 
 <img
+loading="lazy"
+decoding="async"
 src="<?= e($images[0]) ?>"
-class="w-full h-60 object-cover">
+class="w-full h-60 object-cover"
+alt="<?= e($p['nom']) ?>">
 
 <?php else: ?>
 

@@ -370,6 +370,11 @@ if (
                 ?
             )
         ");
+        mail(
+    "mcshimel4@gmail.com",
+    "Nouvelle vente",
+    "Une nouvelle vente vient d'être enregistrée"
+);
 
         $stmt->execute([
 
@@ -611,26 +616,71 @@ if (
    PRODUITS
 ========================================================= */
 
-$stmtProduits = $pdo->prepare("
-    SELECT
-        id,
-        nom,
-        prix_vente,
-        quantite,
-        codebarre,
-        magasin_id
-    FROM produits
-    WHERE quantite > 0
-    AND magasin_id=?
-    ORDER BY nom ASC
-");
+/* =========================================================
+   AJAX PRODUITS
+========================================================= */
 
-$stmtProduits->execute([
-    $magasin_id
-]);
+if (
+    isset($_GET['ajax'])
+    &&
+    $_GET['ajax'] === 'products'
+) {
 
-$produits =
-    $stmtProduits->fetchAll();
+    header('Content-Type: application/json');
+
+    $page =
+        max(
+            1,
+            (int)($_GET['page'] ?? 1)
+        );
+
+    $limit = 40;
+
+    $offset =
+        ($page - 1) * $limit;
+
+    $stmt = $pdo->prepare("
+        SELECT
+            id,
+            nom,
+            prix_vente,
+            quantite,
+            codebarre
+        FROM produits
+        WHERE quantite > 0
+        AND magasin_id=?
+        ORDER BY nom ASC
+        LIMIT ?
+        OFFSET ?
+    ");
+
+    $stmt->bindValue(
+        1,
+        $magasin_id,
+        PDO::PARAM_INT
+    );
+
+    $stmt->bindValue(
+        2,
+        $limit,
+        PDO::PARAM_INT
+    );
+
+    $stmt->bindValue(
+        3,
+        $offset,
+        PDO::PARAM_INT
+    );
+
+    $stmt->execute();
+
+    echo json_encode(
+        $stmt->fetchAll()
+    );
+
+    exit;
+}
+
 
 include 'includes/header.php';
 include 'includes/sidebar.php';
@@ -815,48 +865,11 @@ body{
         📷 Scanner Code Barre
 
     </button>
-
-    <div
-        id="productList"
-        class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4"
-    >
-
-        <?php foreach($produits as $p): ?>
-
-        <button
-            type="button"
-            onclick='addItem(<?= json_encode($p, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>)'
-            data-name="<?= strtolower(e($p['nom'])) ?>"
-            class="product-card text-left"
-        >
-
-            <div class="text-lg font-bold text-slate-800">
-                <?= e($p['nom']) ?>
-            </div>
-
-            <div class="mt-2 product-price">
-
-                <?= number_format(
-                    (float)$p['prix_vente'],
-                    2
-                ) ?>
-
-                <?= e($devise) ?>
-
-            </div>
-
-            <div class="mt-2 text-sm text-gray-500">
-
-                Stock :
-                <?= (int)$p['quantite'] ?>
-
-            </div>
-
-        </button>
-
-        <?php endforeach; ?>
-
-    </div>
+<div
+    id="productList"
+    class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4"
+>
+</div>
 
 </div>
 
@@ -1009,9 +1022,75 @@ body{
 
 let cart = [];
 
-const produits =
-    <?= json_encode($produits, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
+let produits = [];
+let currentPage = 1;
+let loadingProducts = false;
+/*Ajouter le Lazy Loading*/
+async function loadProducts(){
 
+    if(loadingProducts){
+        return;
+    }
+
+    loadingProducts = true;
+
+    let r =
+        await fetch(
+            '?ajax=products&page='
+            + currentPage
+        );
+
+    let data =
+        await r.json();
+
+    produits.push(...data);
+
+    let html = '';
+
+    data.forEach(p=>{
+
+        html += `
+        <button
+            type="button"
+            onclick='addItem(${JSON.stringify(p)})'
+            data-name="${p.nom.toLowerCase()}"
+            class="product-card text-left"
+        >
+
+            <div class="text-lg font-bold text-slate-800">
+
+                ${p.nom}
+
+            </div>
+
+            <div class="mt-2 product-price">
+
+                ${parseFloat(p.prix_vente).toFixed(2)}
+                ${DEVISE}
+
+            </div>
+
+            <div class="mt-2 text-sm text-gray-500">
+
+                Stock : ${p.quantite}
+
+            </div>
+
+        </button>
+        `;
+    });
+
+    document
+        .getElementById('productList')
+        .insertAdjacentHTML(
+            'beforeend',
+            html
+        );
+
+    currentPage++;
+
+    loadingProducts = false;
+}
 /* =========================================
    PANIER FLOTTANT
 ========================================= */
@@ -1452,6 +1531,106 @@ document
             ) || 0;
 
         calc(total);
+    }
+);
+window.onload = () => {
+
+    let content =
+        document
+        .getElementById('ticketPrint')
+        .innerHTML;
+
+    let copies = prompt(
+        "Nombre de copies à imprimer ?",
+        "1"
+    );
+
+    copies = parseInt(copies);
+
+    if(isNaN(copies) || copies <= 0){
+
+        copies = 1;
+    }
+
+    let w =
+        window.open(
+            '',
+            '',
+            'width=400,height=700'
+        );
+
+    let html = `
+    <html>
+    <head>
+        <title>Ticket</title>
+
+        <style>
+
+            body{
+                font-family:monospace;
+                margin:0;
+                padding:0;
+            }
+
+            .ticket-copy{
+                margin-bottom:25px;
+                page-break-after:always;
+            }
+
+        </style>
+
+    </head>
+
+    <body>
+    `;
+
+    for(let i=0; i<copies; i++){
+
+        html += `
+        <div class="ticket-copy">
+            ${content}
+        </div>
+        `;
+    }
+
+    html += `
+    </body>
+    </html>
+    `;
+
+    w.document.write(html);
+
+    w.document.close();
+
+    w.focus();
+
+    setTimeout(()=>{
+
+        w.print();
+
+    },500);
+};
+
+loadProducts();
+
+window.addEventListener(
+    'scroll',
+    ()=>{
+
+        if(
+
+            window.innerHeight +
+            window.scrollY
+
+            >=
+
+            document.body.offsetHeight
+            - 500
+
+        ){
+
+            loadProducts();
+        }
     }
 );
 
